@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Animated, ScrollView } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, Animated, ScrollView, Alert } from 'react-native';
 import { audioService } from '../services/audioService';
 import { emotionAPIService } from '../services/emotionAPIService';
 import { SpeechEmotionResult, EmotionType } from '../types/emotion';
@@ -31,10 +31,12 @@ export const SpeechEmotionScreen: React.FC = () => {
   const [duration, setDuration] = useState(0);
   const [result, setResult] = useState<SpeechEmotionResult | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentRecordingUri, setCurrentRecordingUri] = useState<string>('');
   const [pulseAnim] = useState(new Animated.Value(1));
 
   useEffect(() => {
-    let interval: NodeJS.Timeout;
+    let interval: any;
     if (isRecording) {
       interval = setInterval(async () => {
         const dur = await audioService.getDuration();
@@ -67,13 +69,21 @@ export const SpeechEmotionScreen: React.FC = () => {
     }
   }, [isRecording]);
 
+  useEffect(() => {
+    return () => {
+      audioService.cleanup();
+    };
+  }, []);
+
   const handleStartRecording = async () => {
     try {
       await audioService.startRecording();
       setIsRecording(true);
       setResult(null);
+      setCurrentRecordingUri('');
     } catch (error) {
       console.error('Failed to start recording:', error);
+      Alert.alert('Recording Error', 'Failed to start recording. Please check microphone permissions.');
     }
   };
 
@@ -82,6 +92,7 @@ export const SpeechEmotionScreen: React.FC = () => {
       const recording = await audioService.stopRecording();
       setIsRecording(false);
       setIsAnalyzing(true);
+      setCurrentRecordingUri(recording.uri);
 
       const emotionResult = await emotionAPIService.predictSpeechEmotion(recording.uri);
       setResult(emotionResult);
@@ -101,7 +112,54 @@ export const SpeechEmotionScreen: React.FC = () => {
     } catch (error) {
       console.error('Failed to stop recording:', error);
       setIsAnalyzing(false);
+      Alert.alert('Analysis Error', 'Failed to analyze the recording. Please try again.');
     }
+  };
+
+  const handlePlayRecording = async () => {
+    if (!currentRecordingUri) {
+      Alert.alert('No Recording', 'Please record your voice first.');
+      return;
+    }
+
+    try {
+      if (isPlaying) {
+        await audioService.stopPlaying();
+        setIsPlaying(false);
+      } else {
+        await audioService.playRecording(currentRecordingUri);
+        setIsPlaying(true);
+        
+        setTimeout(() => {
+          setIsPlaying(false);
+        }, duration * 1000);
+      }
+    } catch (error) {
+      console.error('Failed to play recording:', error);
+      setIsPlaying(false);
+      Alert.alert('Playback Error', 'Failed to play the recording.');
+    }
+  };
+
+  const handleDeleteRecording = () => {
+    Alert.alert(
+      'Delete Recording',
+      'Are you sure you want to delete this recording?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            if (currentRecordingUri) {
+              await audioService.deleteRecording(currentRecordingUri);
+            }
+            setResult(null);
+            setCurrentRecordingUri('');
+          },
+        },
+      ]
+    );
   };
 
   const formatDuration = (seconds: number): string => {
@@ -144,6 +202,28 @@ export const SpeechEmotionScreen: React.FC = () => {
           <Text style={styles.instruction}>
             {isRecording ? 'Tap to stop recording' : 'Tap to start recording'}
           </Text>
+
+          {currentRecordingUri && !isRecording && (
+            <View style={styles.playbackControls}>
+              <TouchableOpacity 
+                style={[styles.playButton, isPlaying && styles.playingButton]} 
+                onPress={handlePlayRecording}
+              >
+                <Text style={styles.playButtonText}>{isPlaying ? '⏸' : '▶️'}</Text>
+                <Text style={styles.playButtonLabel}>
+                  {isPlaying ? 'Pause' : 'Play Recording'}
+                </Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity 
+                style={styles.deleteButton} 
+                onPress={handleDeleteRecording}
+              >
+                <Text style={styles.deleteButtonText}>🗑️</Text>
+                <Text style={styles.deleteButtonLabel}>Delete</Text>
+              </TouchableOpacity>
+            </View>
+          )}
         </View>
 
         {isAnalyzing && (
@@ -283,6 +363,58 @@ const styles = StyleSheet.create({
     marginTop: 20,
     fontSize: 16,
     color: '#7F8C8D',
+  },
+  playbackControls: {
+    flexDirection: 'row',
+    marginTop: 30,
+    gap: 15,
+  },
+  playButton: {
+    backgroundColor: '#27AE60',
+    paddingVertical: 12,
+    paddingHorizontal: 24,
+    borderRadius: 25,
+    flexDirection: 'row',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 4,
+  },
+  playingButton: {
+    backgroundColor: '#F39C12',
+  },
+  playButtonText: {
+    fontSize: 20,
+    marginRight: 8,
+  },
+  playButtonLabel: {
+    fontSize: 14,
+    color: '#FFF',
+    fontWeight: '600',
+  },
+  deleteButton: {
+    backgroundColor: '#E74C3C',
+    paddingVertical: 12,
+    paddingHorizontal: 24,
+    borderRadius: 25,
+    flexDirection: 'row',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 4,
+  },
+  deleteButtonText: {
+    fontSize: 20,
+    marginRight: 8,
+  },
+  deleteButtonLabel: {
+    fontSize: 14,
+    color: '#FFF',
+    fontWeight: '600',
   },
   analyzingContainer: {
     padding: 20,

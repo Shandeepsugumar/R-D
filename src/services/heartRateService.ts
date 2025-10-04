@@ -1,4 +1,5 @@
-import { Platform } from 'react-native';
+import { Platform, PermissionsAndroid } from 'react-native';
+import GoogleFit, { Scopes, BucketUnit } from 'react-native-google-fit';
 
 export interface HeartRateReading {
   heartRate: number;
@@ -11,6 +12,9 @@ export class HeartRateService {
   private isMonitoring: boolean = false;
   private currentHeartRate: number = 0;
   private listeners: Array<(reading: HeartRateReading) => void> = [];
+  private monitoringInterval: any = null;
+  private isGoogleFitAuthorized: boolean = false;
+  private heartRateHistory: number[] = [];
 
   async requestPermissions(): Promise<boolean> {
     try {
@@ -28,9 +32,8 @@ export class HeartRateService {
 
   private async requestAndroidPermissions(): Promise<boolean> {
     try {
-      const { PermissionsAndroid } = require('react-native');
       const granted = await PermissionsAndroid.request(
-        PermissionsAndroid.PERMISSIONS.BODY_SENSORS,
+        PermissionsAndroid.PERMISSIONS.ACTIVITY_RECOGNITION,
         {
           title: 'Heart Rate Permission',
           message: 'This app needs access to your heart rate sensor for emotion recognition.',
@@ -50,6 +53,49 @@ export class HeartRateService {
     return true;
   }
 
+  async connectGoogleFit(): Promise<boolean> {
+    if (Platform.OS !== 'android') {
+      console.log('Google Fit is only available on Android');
+      return false;
+    }
+
+    try {
+      const options = {
+        scopes: [
+          Scopes.FITNESS_HEART_RATE_READ,
+          Scopes.FITNESS_BODY_READ,
+        ],
+      };
+
+      const result = await GoogleFit.authorize(options);
+      this.isGoogleFitAuthorized = result.success;
+
+      if (result.success) {
+        console.log('Google Fit authorized successfully');
+        GoogleFit.startRecording((callback: any) => {
+          console.log('Google Fit recording started');
+        }, (error: any) => {
+          console.error('Google Fit recording error:', error);
+        });
+      } else {
+        console.error('Google Fit authorization failed');
+      }
+
+      return result.success;
+    } catch (error) {
+      console.error('Error connecting to Google Fit:', error);
+      return false;
+    }
+  }
+
+  async connectAppleHealth(): Promise<boolean> {
+    if (Platform.OS !== 'ios') {
+      console.log('Apple Health is only available on iOS');
+      return false;
+    }
+    return true;
+  }
+
   async startMonitoring(): Promise<void> {
     const hasPermission = await this.requestPermissions();
     if (!hasPermission) {
@@ -57,11 +103,67 @@ export class HeartRateService {
     }
 
     this.isMonitoring = true;
-    this.simulateHeartRateReadings();
+
+    if (Platform.OS === 'android' && this.isGoogleFitAuthorized) {
+      await this.monitorGoogleFitHeartRate();
+    } else {
+      this.simulateHeartRateReadings();
+    }
+  }
+
+  private async monitorGoogleFitHeartRate(): Promise<void> {
+    this.monitoringInterval = setInterval(async () => {
+      if (!this.isMonitoring) {
+        return;
+      }
+
+      try {
+        const endDate = new Date();
+        const startDate = new Date(endDate.getTime() - 60000);
+
+        const heartRateSamples = await GoogleFit.getHeartRateSamples({
+          startDate: startDate.toISOString(),
+          endDate: endDate.toISOString(),
+          bucketUnit: BucketUnit.MINUTE,
+          bucketInterval: 1,
+        });
+
+        if (heartRateSamples && heartRateSamples.length > 0) {
+          const latestSample = heartRateSamples[heartRateSamples.length - 1];
+          const heartRate = Math.round(latestSample.value);
+
+          this.heartRateHistory.push(heartRate);
+          if (this.heartRateHistory.length > 10) {
+            this.heartRateHistory.shift();
+          }
+
+          const variability = this.calculateVariability(this.heartRateHistory);
+
+          const reading: HeartRateReading = {
+            heartRate,
+            timestamp: new Date(latestSample.startDate),
+            variability,
+            source: 'google_fit',
+          };
+
+          this.currentHeartRate = heartRate;
+          this.notifyListeners(reading);
+        } else {
+          this.simulateHeartRateReadings();
+        }
+      } catch (error) {
+        console.error('Error fetching Google Fit heart rate:', error);
+        this.simulateHeartRateReadings();
+      }
+    }, 2000);
   }
 
   stopMonitoring(): void {
     this.isMonitoring = false;
+    if (this.monitoringInterval) {
+      clearInterval(this.monitoringInterval);
+      this.monitoringInterval = null;
+    }
   }
 
   private simulateHeartRateReadings(): void {
@@ -71,17 +173,26 @@ export class HeartRateService {
     const variation = 15;
     const heartRate = Math.floor(baseHeartRate + (Math.random() - 0.5) * variation);
 
+    this.heartRateHistory.push(heartRate);
+    if (this.heartRateHistory.length > 10) {
+      this.heartRateHistory.shift();
+    }
+
+    const variability = this.calculateVariability(this.heartRateHistory);
+
     const reading: HeartRateReading = {
       heartRate,
       timestamp: new Date(),
-      variability: Math.random() * 50 + 20,
+      variability,
       source: Platform.OS === 'android' ? 'google_fit' : 'apple_health',
     };
 
     this.currentHeartRate = heartRate;
     this.notifyListeners(reading);
 
-    setTimeout(() => this.simulateHeartRateReadings(), 1000);
+    if (this.isMonitoring && !this.monitoringInterval) {
+      setTimeout(() => this.simulateHeartRateReadings(), 1000);
+    }
   }
 
   getCurrentHeartRate(): number {
@@ -90,6 +201,10 @@ export class HeartRateService {
 
   getIsMonitoring(): boolean {
     return this.isMonitoring;
+  }
+
+  isConnected(): boolean {
+    return this.isGoogleFitAuthorized;
   }
 
   subscribe(callback: (reading: HeartRateReading) => void): () => void {
@@ -104,6 +219,26 @@ export class HeartRateService {
   }
 
   async getHistoricalData(startDate: Date, endDate: Date): Promise<HeartRateReading[]> {
+    if (Platform.OS === 'android' && this.isGoogleFitAuthorized) {
+      try {
+        const heartRateSamples = await GoogleFit.getHeartRateSamples({
+          startDate: startDate.toISOString(),
+          endDate: endDate.toISOString(),
+          bucketUnit: BucketUnit.HOUR,
+          bucketInterval: 1,
+        });
+
+        return heartRateSamples.map((sample: any) => ({
+          heartRate: Math.round(sample.value),
+          timestamp: new Date(sample.startDate),
+          variability: 0,
+          source: 'google_fit' as const,
+        }));
+      } catch (error) {
+        console.error('Error fetching historical data from Google Fit:', error);
+      }
+    }
+
     const mockData: HeartRateReading[] = [];
     const daysDiff = Math.ceil((endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24));
 
@@ -130,14 +265,6 @@ export class HeartRateService {
 
     const sum = differences.reduce((acc, val) => acc + val, 0);
     return sum / differences.length;
-  }
-
-  async connectGoogleFit(): Promise<boolean> {
-    return true;
-  }
-
-  async connectAppleHealth(): Promise<boolean> {
-    return true;
   }
 }
 
